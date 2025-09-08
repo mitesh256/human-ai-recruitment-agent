@@ -1,0 +1,1 @@
+pip install fastapi uvicorn python-dotenv mysql-connector-python passlib[bcrypt] python-jose[cryptography] python-multipart
