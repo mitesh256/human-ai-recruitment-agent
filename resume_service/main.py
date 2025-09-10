@@ -473,6 +473,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.security import HTTPBearer
 import PyPDF2
+from fastapi.middleware.cors import CORSMiddleware
 import io
 import re
 from typing import List, Dict, Optional
@@ -484,6 +485,19 @@ import google.generativeai as genai
 from pydantic import BaseModel
 
 app = FastAPI(title="Resume Processing Service", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://localhost:3000"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 security = HTTPBearer()
 
 # Configure Gemini API

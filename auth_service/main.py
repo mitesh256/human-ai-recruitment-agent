@@ -681,6 +681,7 @@
 from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware 
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -704,6 +705,20 @@ app = FastAPI(
     description="An AI-powered recruitment agent to streamline hiring processes.",
     version="1.0.0"
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://localhost:3000"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 
 # ✅ FIXED: Consistent naming
 UPLOAD_DIR = "uploads/resumes"
@@ -985,49 +1000,6 @@ async def root():
         "features": ["Authentication", "Resume Processing", "AI Scoring"]
     }
     
-@app.post("/register", response_model=UserResponse)
-async def register_user(user: UserRegistration):
-    connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
-    
-    try:
-        # Check if email already exists
-        cursor.execute("SELECT * FROM users WHERE email = %s", (user.email,))
-        if cursor.fetchone():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email already registered"
-            )
-        
-        # Create new user
-        user_id = str(uuid.uuid4())
-        hashed_password = get_password_hash(user.password)
-        
-        cursor.execute(
-            "INSERT INTO users (id, email, password_hash, role) VALUES (%s, %s, %s, %s)",
-            (user_id, user.email, hashed_password, user.role)
-        )
-        connection.commit()
-        
-        # Fetch the created user
-        cursor.execute("SELECT id, email, role, created_at FROM users WHERE id = %s", (user_id,))
-        created_user = cursor.fetchone()
-        
-        return UserResponse(
-            id=created_user['id'],
-            email=created_user['email'],
-            role=created_user['role'],
-            created_at=created_user['created_at']
-        )
-        
-    except mysql.connector.Error as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Registration failed: {str(e)}"
-        )
-    finally:
-        cursor.close()
-        connection.close()
         
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -1064,6 +1036,62 @@ async def login_user(credentials: UserLogin):
     )
     
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+# Add this to your auth_service/main.py after the existing login endpoint
+@app.post("/register")
+async def register_user(user: UserRegistration):
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    
+    try:
+        # Check if email already exists
+        cursor.execute("SELECT * FROM users WHERE email = %s", (user.email,))
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+        
+        # Create new user
+        user_id = str(uuid.uuid4())
+        hashed_password = get_password_hash(user.password)
+        
+        cursor.execute(
+            "INSERT INTO users (id, email, password_hash, role) VALUES (%s, %s, %s, %s)",
+            (user_id, user.email, hashed_password, user.role)
+        )
+        connection.commit()
+        
+        # Generate access token immediately
+        access_token_expires = timedelta(minutes=access_token_expire_minutes)
+        access_token = create_access_token(
+            data={"sub": user.email},
+            expires_delta=access_token_expires
+        )
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": {
+                "id": user_id,
+                "email": user.email,
+                "role": user.role
+            },
+            "message": "Registration successful"
+        }
+        
+    except mysql.connector.Error as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Registration failed: {str(e)}"
+        )
+    finally:
+        cursor.close()
+        connection.close()
+
+
+
 
 @app.get("/profile")
 async def get_user_profile(current_user: dict = Depends(get_current_user)):
@@ -1194,9 +1222,46 @@ async def get_candidate_profile(candidate_id: str, current_user: dict = Depends(
     )
 
 # ✅ NEW: Candidates listing endpoint for recruiters
+# @app.get("/candidates")
+# async def list_candidates(current_user: dict = Depends(get_current_user)):
+#     """List all candidates (recruiters/admins only)"""
+#     if current_user["role"] not in ["recruiter", "admin"]:
+#         raise HTTPException(status_code=403, detail="Access forbidden")
+    
+#     connection = get_db_connection()
+#     cursor = connection.cursor(dictionary=True)
+    
+#     try:
+#         cursor.execute("""
+#             SELECT u.id, u.email, u.created_at, cp.full_name, cp.ai_score, cp.profile_completed
+#             FROM users u
+#             LEFT JOIN candidate_profile cp ON u.id = cp.user_id
+#             WHERE u.role = 'candidate'
+#             ORDER BY cp.ai_score DESC, u.created_at DESC
+#         """)
+#         candidates = cursor.fetchall()
+        
+#         # Convert to response format
+#         candidate_list = []
+#         for candidate in candidates:
+#             candidate_list.append(CandidateListItem(
+#                 id=candidate['id'],
+#                 email=candidate['email'],
+#                 full_name=candidate.get('full_name'),
+#                 ai_score=candidate.get('ai_score'),
+#                 profile_completed=bool(candidate.get('profile_completed', False)),
+#                 created_at=candidate['created_at']
+#             ))
+        
+#         return {"candidates": candidate_list, "total": len(candidate_list)}
+#     finally:
+#         cursor.close()
+#         connection.close()
+
+
 @app.get("/candidates")
 async def list_candidates(current_user: dict = Depends(get_current_user)):
-    """List all candidates (recruiters/admins only)"""
+    """List all candidates with full details for recruiters"""
     if current_user["role"] not in ["recruiter", "admin"]:
         raise HTTPException(status_code=403, detail="Access forbidden")
     
@@ -1205,9 +1270,16 @@ async def list_candidates(current_user: dict = Depends(get_current_user)):
     
     try:
         cursor.execute("""
-            SELECT u.id, u.email, u.created_at, cp.full_name, cp.ai_score, cp.profile_completed
+            SELECT 
+                u.id, u.email, u.created_at as user_created_at,
+                cp.full_name, cp.phone, cp.location, cp.experience_years,
+                cp.skills, cp.resume_url, cp.linkedin_url, 
+                cp.ai_score, cp.profile_completed,
+                cp.created_at as profile_created_at,
+                r.filename as resume_filename, r.file_size, r.upload_date
             FROM users u
             LEFT JOIN candidate_profile cp ON u.id = cp.user_id
+            LEFT JOIN resumes r ON u.id = r.candidate_id
             WHERE u.role = 'candidate'
             ORDER BY cp.ai_score DESC, u.created_at DESC
         """)
@@ -1216,19 +1288,68 @@ async def list_candidates(current_user: dict = Depends(get_current_user)):
         # Convert to response format
         candidate_list = []
         for candidate in candidates:
-            candidate_list.append(CandidateListItem(
-                id=candidate['id'],
-                email=candidate['email'],
-                full_name=candidate.get('full_name'),
-                ai_score=candidate.get('ai_score'),
-                profile_completed=bool(candidate.get('profile_completed', False)),
-                created_at=candidate['created_at']
-            ))
+            candidate_data = {
+                "id": candidate['id'],
+                "email": candidate['email'],
+                "full_name": candidate.get('full_name'),
+                "phone": candidate.get('phone'),
+                "location": candidate.get('location'),
+                "experience_years": candidate.get('experience_years', 0),
+                "skills": candidate.get('skills', '').split(', ') if candidate.get('skills') else [],
+                "resume_url": candidate.get('resume_url'),
+                "resume_filename": candidate.get('resume_filename'),
+                "file_size": candidate.get('file_size'),
+                "linkedin_url": candidate.get('linkedin_url'),
+                "ai_score": candidate.get('ai_score', 0),
+                "profile_completed": bool(candidate.get('profile_completed', False)),
+                "user_created_at": candidate['user_created_at'],
+                "profile_created_at": candidate.get('profile_created_at'),
+                "resume_upload_date": candidate.get('upload_date')
+            }
+            candidate_list.append(candidate_data)
         
         return {"candidates": candidate_list, "total": len(candidate_list)}
     finally:
         cursor.close()
         connection.close()
+
+# Add endpoint to download/view resume
+@app.get("/candidate/{candidate_id}/resume")
+async def get_candidate_resume(candidate_id: str, current_user: dict = Depends(get_current_user)):
+    """Get candidate's resume file for recruiters"""
+    if current_user["role"] not in ["recruiter", "admin"]:
+        raise HTTPException(status_code=403, detail="Access forbidden")
+    
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    
+    try:
+        cursor.execute("""
+            SELECT r.filename, r.file_path, r.content_text, r.ai_analysis
+            FROM resumes r
+            JOIN users u ON r.candidate_id = u.id
+            WHERE u.id = %s AND u.role = 'candidate'
+            ORDER BY r.upload_date DESC
+            LIMIT 1
+        """, (candidate_id,))
+        
+        resume = cursor.fetchone()
+        if not resume:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        
+        # Return resume info (file path can be used by frontend to download)
+        return {
+            "filename": resume['filename'],
+            "file_path": resume['file_path'],
+            "download_url": f"/uploads/resumes/{resume['filename']}",
+            "ai_analysis": json.loads(resume['ai_analysis']) if resume['ai_analysis'] else None,
+            "content_preview": resume['content_text'][:500] if resume['content_text'] else None
+        }
+    finally:
+        cursor.close()
+        connection.close()
+
+
 
 # =============================================================================
 # RESUME UPLOAD (UNCHANGED - ALREADY WORKING)
